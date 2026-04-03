@@ -113,7 +113,13 @@ export class DiscordChannel implements Channel {
 
       // Store chat metadata for discovery (runs for all messages, not just registered)
       const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'discord',
+        isGroup,
+      );
 
       // Only process fully for registered groups — look up early so we have
       // the group folder path available for image caching below.
@@ -140,13 +146,22 @@ export class DiscordChannel implements Channel {
 
             // Voice note — transcribe via Whisper before delivering to agent
             if (isVoiceNote && contentType.startsWith('audio/')) {
-              logger.info({ msgId, url: att.url }, 'Voice note detected — transcribing');
+              logger.info(
+                { msgId, url: att.url },
+                'Voice note detected — transcribing',
+              );
               const transcript = await transcribeAudio(att.url);
               if (transcript) {
-                logger.info({ msgId, length: transcript.length }, 'Voice note transcribed');
+                logger.info(
+                  { msgId, length: transcript.length },
+                  'Voice note transcribed',
+                );
                 return `[Voice Note: "${transcript}"]`;
               }
-              logger.warn({ msgId }, 'Voice note transcription failed — using URL fallback');
+              logger.warn(
+                { msgId },
+                'Voice note transcription failed — using URL fallback',
+              );
               return `[Voice Note (untranscribed): ${att.url}]`;
             }
 
@@ -161,11 +176,17 @@ export class DiscordChannel implements Channel {
                 att.name || 'image.jpg',
               );
               if (containerPath) {
-                logger.info({ msgId, containerPath }, 'Image cached for agent vision');
+                logger.info(
+                  { msgId, containerPath },
+                  'Image cached for agent vision',
+                );
                 return `[Image: ${att.name || 'image'} | ${containerPath}]`;
               }
               // Download failed — pass URL as hint (agent can't Read it, but has context)
-              logger.warn({ msgId }, 'Image download failed — passing URL hint');
+              logger.warn(
+                { msgId },
+                'Image download failed — passing URL hint',
+              );
               return `[Image: ${att.name || 'image'} | url: ${att.url}]`;
             }
 
@@ -230,7 +251,10 @@ export class DiscordChannel implements Channel {
     // alternative to typing a reply. Only fires for reactions on the bot's own messages.
     this.client.on(
       Events.MessageReactionAdd,
-      async (reaction: MessageReaction | PartialMessageReaction, user: User | PartialUser) => {
+      async (
+        reaction: MessageReaction | PartialMessageReaction,
+        user: User | PartialUser,
+      ) => {
         // Ignore bot reactions (our own ⚙️/✅ reactions would re-trigger otherwise)
         if (user.bot) return;
         if (!this.client?.user) return;
@@ -362,7 +386,8 @@ export class DiscordChannel implements Channel {
         this.pendingReactions.delete(jid);
         try {
           const gearReaction = pendingMsg.reactions.cache.get('⚙️');
-          if (gearReaction) await gearReaction.users.remove(this.client!.user!.id);
+          if (gearReaction)
+            await gearReaction.users.remove(this.client!.user!.id);
           await pendingMsg.react('✅');
         } catch (reactionErr) {
           logger.debug({ jid, reactionErr }, 'Failed to update reaction');
@@ -417,7 +442,8 @@ async function downloadImageToCache(
 ): Promise<string | null> {
   try {
     // Sanitize filename to avoid path traversal or shell issues
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_') || `image-${Date.now()}.jpg`;
+    const safeName =
+      filename.replace(/[^a-zA-Z0-9._-]/g, '_') || `image-${Date.now()}.jpg`;
     const cacheDir = path.join(groupFolderPath, '.image-cache');
     fs.mkdirSync(cacheDir, { recursive: true });
 
@@ -426,7 +452,10 @@ async function downloadImageToCache(
 
     const res = await fetch(url);
     if (!res.ok) {
-      logger.warn({ status: res.status, url }, 'Failed to download image attachment');
+      logger.warn(
+        { status: res.status, url },
+        'Failed to download image attachment',
+      );
       return null;
     }
 
@@ -468,7 +497,10 @@ async function transcribeAudio(url: string): Promise<string | null> {
     // Download audio from Discord CDN (signed URL, must fetch immediately)
     const audioRes = await fetch(url);
     if (!audioRes.ok) {
-      logger.warn({ status: audioRes.status, url }, 'Failed to download voice note');
+      logger.warn(
+        { status: audioRes.status, url },
+        'Failed to download voice note',
+      );
       return null;
     }
     const buffer = Buffer.from(await audioRes.arrayBuffer());

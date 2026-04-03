@@ -32,18 +32,33 @@ import { RegisteredGroup } from './types.js';
 import { readEnvFile } from './env.js';
 
 // Langfuse keys — read at startup from .env (systemd service doesn't source it)
-const _lfEnv = readEnvFile(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_NETWORK', 'ENABLE_MODEL_ROUTING', 'MODEL_HAIKU', 'MODEL_SONNET', 'DISCORD_BOT_TOKEN']);
+const _lfEnv = readEnvFile([
+  'LANGFUSE_HOST',
+  'LANGFUSE_PUBLIC_KEY',
+  'LANGFUSE_SECRET_KEY',
+  'LANGFUSE_NETWORK',
+  'ENABLE_MODEL_ROUTING',
+  'MODEL_HAIKU',
+  'MODEL_SONNET',
+  'DISCORD_BOT_TOKEN',
+]);
 const LF_HOST = process.env.LANGFUSE_HOST || _lfEnv.LANGFUSE_HOST;
-const LF_PUBLIC_KEY = process.env.LANGFUSE_PUBLIC_KEY || _lfEnv.LANGFUSE_PUBLIC_KEY;
-const LF_SECRET_KEY = process.env.LANGFUSE_SECRET_KEY || _lfEnv.LANGFUSE_SECRET_KEY;
+const LF_PUBLIC_KEY =
+  process.env.LANGFUSE_PUBLIC_KEY || _lfEnv.LANGFUSE_PUBLIC_KEY;
+const LF_SECRET_KEY =
+  process.env.LANGFUSE_SECRET_KEY || _lfEnv.LANGFUSE_SECRET_KEY;
 
 // Model routing — opt-in via ENABLE_MODEL_ROUTING=true in .env
-const ROUTING_ENABLED = (process.env.ENABLE_MODEL_ROUTING || _lfEnv.ENABLE_MODEL_ROUTING) === 'true';
-const MODEL_HAIKU = process.env.MODEL_HAIKU || _lfEnv.MODEL_HAIKU || 'claude-haiku-4-5';
-const MODEL_SONNET = process.env.MODEL_SONNET || _lfEnv.MODEL_SONNET || 'claude-sonnet-4-5';
+const ROUTING_ENABLED =
+  (process.env.ENABLE_MODEL_ROUTING || _lfEnv.ENABLE_MODEL_ROUTING) === 'true';
+const MODEL_HAIKU =
+  process.env.MODEL_HAIKU || _lfEnv.MODEL_HAIKU || 'claude-haiku-4-5';
+const MODEL_SONNET =
+  process.env.MODEL_SONNET || _lfEnv.MODEL_SONNET || 'claude-sonnet-4-5';
 
 // Discord bot token — read from .env for container injection (enables scheduled tasks to post to Discord channels)
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || _lfEnv.DISCORD_BOT_TOKEN;
+const DISCORD_BOT_TOKEN =
+  process.env.DISCORD_BOT_TOKEN || _lfEnv.DISCORD_BOT_TOKEN;
 
 // Session freshness — start a new session if idle >1h to avoid paying for stale context windows.
 // Per Anthropic recommendation: https://x.com/lydiahallie/status/2039800718371307603
@@ -55,17 +70,43 @@ const SESSION_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 // If it's asking me a question, checking status, or having a conversation → Haiku.
 const SONNET_PHRASES = [
   // Code & engineering work
-  'write code', 'write a script', 'write a function', 'build a', 'implement',
-  'debug this', 'debug the', 'fix the bug', 'fix this', 'refactor',
-  'deploy ', 'configure the', 'patch the', 'commit to',
+  'write code',
+  'write a script',
+  'write a function',
+  'build a',
+  'implement',
+  'debug this',
+  'debug the',
+  'fix the bug',
+  'fix this',
+  'refactor',
+  'deploy ',
+  'configure the',
+  'patch the',
+  'commit to',
   // Deep analysis & research
-  'analyze the', 'analyze this', 'deep research', 'investigate the',
-  'synthesize', 'multi-source', 'run a report', 'produce a report',
+  'analyze the',
+  'analyze this',
+  'deep research',
+  'investigate the',
+  'synthesize',
+  'multi-source',
+  'run a report',
+  'produce a report',
   // Agent orchestration
-  'spawn an agent', 'delegate to', 'run the agent', 'launch the agent',
+  'spawn an agent',
+  'delegate to',
+  'run the agent',
+  'launch the agent',
   // Complex creation tasks
-  'generate a full', 'create a plan', 'design a system', 'architect',
-  'build out', 'set up a pipeline', 'wire up', 'integrate with',
+  'generate a full',
+  'create a plan',
+  'design a system',
+  'architect',
+  'build out',
+  'set up a pipeline',
+  'wire up',
+  'integrate with',
 ];
 
 /**
@@ -90,7 +131,8 @@ function selectModel(input: ContainerInput): string {
   if (length > 1500) return MODEL_SONNET;
 
   // Intent-based phrase match → Sonnet
-  if (SONNET_PHRASES.some((phrase) => text.includes(phrase))) return MODEL_SONNET;
+  if (SONNET_PHRASES.some((phrase) => text.includes(phrase)))
+    return MODEL_SONNET;
 
   // Everything else → Haiku (conversational, status checks, simple questions)
   logger.debug({ promptLength: length }, 'Model routing: selected Haiku');
@@ -102,7 +144,10 @@ function selectModel(input: ContainerInput): string {
  * traceId: Session-level identifier (persists across container operations)
  * spanId: Operation-level identifier (unique per container spawn)
  */
-function generateTraceIds(sessionId?: string): { traceId: string; spanId: string } {
+function generateTraceIds(sessionId?: string): {
+  traceId: string;
+  spanId: string;
+} {
   // Use existing sessionId as traceId for correlation, or generate new one
   const traceId = sessionId || crypto.randomUUID();
   const spanId = crypto.randomBytes(8).toString('hex');
@@ -419,18 +464,29 @@ export async function runContainerAgent(
       const idleMs = Date.now() - new Date(la.timestamp).getTime();
       if (idleMs > SESSION_IDLE_THRESHOLD_MS) {
         logger.info(
-          { group: group.name, idleMinutes: Math.round(idleMs / 60000), staleSessionId: input.sessionId },
+          {
+            group: group.name,
+            idleMinutes: Math.round(idleMs / 60000),
+            staleSessionId: input.sessionId,
+          },
           'Session idle >1h — starting fresh to avoid stale context cost',
         );
         effectiveInput = { ...input, sessionId: undefined };
       }
-    } catch { /* no file yet or unreadable — keep existing session */ }
+    } catch {
+      /* no file yet or unreadable — keep existing session */
+    }
   }
   // Stamp activity time now (message is being processed)
   try {
     fs.mkdirSync(groupIpcDir, { recursive: true });
-    fs.writeFileSync(lastActivityFile, JSON.stringify({ timestamp: new Date().toISOString() }));
-  } catch { /* non-fatal */ }
+    fs.writeFileSync(
+      lastActivityFile,
+      JSON.stringify({ timestamp: new Date().toISOString() }),
+    );
+  } catch {
+    /* non-fatal */
+  }
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
@@ -438,17 +494,27 @@ export async function runContainerAgent(
   const model = selectModel(effectiveInput);
   const { traceId, spanId } = generateTraceIds(effectiveInput.sessionId);
 
-  logger.debug({
-    group: group.name,
+  logger.debug(
+    {
+      group: group.name,
+      model,
+      routingEnabled: ROUTING_ENABLED,
+      traceId,
+      spanId,
+      sessionId: effectiveInput.sessionId,
+      chatJid: effectiveInput.chatJid,
+      isMain: effectiveInput.isMain,
+    },
+    'Model selected for container',
+  );
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
     model,
-    routingEnabled: ROUTING_ENABLED,
     traceId,
     spanId,
-    sessionId: effectiveInput.sessionId,
-    chatJid: effectiveInput.chatJid,
-    isMain: effectiveInput.isMain,
-  }, 'Model selected for container');
-  const containerArgs = buildContainerArgs(mounts, containerName, model, traceId, spanId, effectiveInput);
+    effectiveInput,
+  );
 
   logger.debug(
     {
@@ -488,9 +554,16 @@ export async function runContainerAgent(
     const lfNetwork = process.env.LANGFUSE_NETWORK || _lfEnv.LANGFUSE_NETWORK;
     if (LF_HOST && lfNetwork) {
       setTimeout(() => {
-        exec(`${CONTAINER_RUNTIME_BIN} network connect ${lfNetwork} ${containerName}`, (err) => {
-          if (err) logger.warn({ error: err.message }, 'Langfuse network connect failed (non-fatal)');
-        });
+        exec(
+          `${CONTAINER_RUNTIME_BIN} network connect ${lfNetwork} ${containerName}`,
+          (err) => {
+            if (err)
+              logger.warn(
+                { error: err.message },
+                'Langfuse network connect failed (non-fatal)',
+              );
+          },
+        );
       }, 800);
     }
 
