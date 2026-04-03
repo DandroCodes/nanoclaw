@@ -5,7 +5,6 @@
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 
 import {
   CONTAINER_IMAGE,
@@ -32,7 +31,7 @@ import { RegisteredGroup } from './types.js';
 import { readEnvFile } from './env.js';
 
 // Langfuse keys — read at startup from .env (systemd service doesn't source it)
-const _lfEnv = readEnvFile(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_NETWORK', 'ENABLE_MODEL_ROUTING', 'MODEL_HAIKU', 'MODEL_SONNET', 'DISCORD_BOT_TOKEN']);
+const _lfEnv = readEnvFile(['LANGFUSE_HOST', 'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_NETWORK', 'ENABLE_MODEL_ROUTING', 'MODEL_HAIKU', 'MODEL_SONNET']);
 const LF_HOST = process.env.LANGFUSE_HOST || _lfEnv.LANGFUSE_HOST;
 const LF_PUBLIC_KEY = process.env.LANGFUSE_PUBLIC_KEY || _lfEnv.LANGFUSE_PUBLIC_KEY;
 const LF_SECRET_KEY = process.env.LANGFUSE_SECRET_KEY || _lfEnv.LANGFUSE_SECRET_KEY;
@@ -42,71 +41,34 @@ const ROUTING_ENABLED = (process.env.ENABLE_MODEL_ROUTING || _lfEnv.ENABLE_MODEL
 const MODEL_HAIKU = process.env.MODEL_HAIKU || _lfEnv.MODEL_HAIKU || 'claude-haiku-4-5';
 const MODEL_SONNET = process.env.MODEL_SONNET || _lfEnv.MODEL_SONNET || 'claude-sonnet-4-5';
 
-// Discord bot token — read from .env for container injection (enables scheduled tasks to post to Discord channels)
-const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || _lfEnv.DISCORD_BOT_TOKEN;
-
-// Session freshness — start a new session if idle >1h to avoid paying for stale context windows.
-// Per Anthropic recommendation: https://x.com/lydiahallie/status/2039800718371307603
-const SESSION_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
-
-// Intent-based phrases that indicate genuine complexity requiring Sonnet.
-// These are PHRASES not single words — avoids false positives on conversational messages.
-// Rule: if a message is asking me to *do something technical*, it needs Sonnet.
-// If it's asking me a question, checking status, or having a conversation → Haiku.
-const SONNET_PHRASES = [
-  // Code & engineering work
-  'write code', 'write a script', 'write a function', 'build a', 'implement',
-  'debug this', 'debug the', 'fix the bug', 'fix this', 'refactor',
-  'deploy ', 'configure the', 'patch the', 'commit to',
-  // Deep analysis & research
-  'analyze the', 'analyze this', 'deep research', 'investigate the',
-  'synthesize', 'multi-source', 'run a report', 'produce a report',
-  // Agent orchestration
-  'spawn an agent', 'delegate to', 'run the agent', 'launch the agent',
-  // Complex creation tasks
-  'generate a full', 'create a plan', 'design a system', 'architect',
-  'build out', 'set up a pipeline', 'wire up', 'integrate with',
+// Keywords that indicate a complex request requiring Sonnet
+const SONNET_KEYWORDS = [
+  'code', 'build', 'implement', 'debug', 'fix', 'create', 'write', 'refactor',
+  'deploy', 'install', 'configure', 'patch', 'analyze', 'research', 'design',
+  'plan', 'script', 'function', 'class', 'file', 'commit', 'test', 'execute',
+  'agent', 'dashboard', 'search', 'investigate', 'generate', 'parse', 'query',
 ];
 
 /**
  * Select the Claude model for this request.
- * Haiku default — Sonnet only for clearly complex technical work.
- * Scheduled tasks always use Haiku (cost optimization).
+ * Returns Sonnet for complex/long prompts, Haiku for simple short ones.
  * Only active when ENABLE_MODEL_ROUTING=true — otherwise always returns Sonnet.
  */
 function selectModel(input: ContainerInput): string {
   if (!ROUTING_ENABLED) return MODEL_SONNET;
 
-  // Scheduled tasks are always Haiku — summaries, reminders, heartbeats don't need Sonnet
-  if (input.isScheduledTask) {
-    logger.debug('Model routing: scheduled task → Haiku');
-    return MODEL_HAIKU;
-  }
-
   const text = input.prompt.toLowerCase();
   const length = input.prompt.length;
 
-  // Very long prompts with technical content are complex (raised threshold from 400 → 1500)
-  if (length > 1500) return MODEL_SONNET;
+  // Long prompts are inherently complex
+  if (length > 400) return MODEL_SONNET;
 
-  // Intent-based phrase match → Sonnet
-  if (SONNET_PHRASES.some((phrase) => text.includes(phrase))) return MODEL_SONNET;
+  // Any complexity keyword → Sonnet
+  if (SONNET_KEYWORDS.some((kw) => text.includes(kw))) return MODEL_SONNET;
 
-  // Everything else → Haiku (conversational, status checks, simple questions)
+  // Short, keyword-free prompt → Haiku
   logger.debug({ promptLength: length }, 'Model routing: selected Haiku');
   return MODEL_HAIKU;
-}
-
-/**
- * Generate OpenTelemetry-style trace IDs for request correlation.
- * traceId: Session-level identifier (persists across container operations)
- * spanId: Operation-level identifier (unique per container spawn)
- */
-function generateTraceIds(sessionId?: string): { traceId: string; spanId: string } {
-  // Use existing sessionId as traceId for correlation, or generate new one
-  const traceId = sessionId || crypto.randomUUID();
-  const spanId = crypto.randomBytes(8).toString('hex');
-  return { traceId, spanId };
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -317,9 +279,6 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   model: string,
-  traceId: string,
-  spanId: string,
-  input: ContainerInput,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -350,16 +309,6 @@ function buildContainerArgs(
   // Agent-runner reads this and passes it to query() options.
   args.push('-e', `CLAUDE_MODEL=${model}`);
 
-  // Trace IDs for structured logging correlation
-  args.push('-e', `TRACE_ID=${traceId}`);
-  args.push('-e', `PARENT_SPAN_ID=${spanId}`);
-
-  // Session and group metadata for structured logging
-  args.push('-e', `SESSION_ID=${input.sessionId || 'unknown'}`);
-  args.push('-e', `CHAT_JID=${input.chatJid}`);
-  args.push('-e', `IS_MAIN=${input.isMain}`);
-  args.push('-e', `ASSISTANT_NAME=${input.assistantName || 'DOOM'}`);
-
   // Langfuse observability — inject keys only (NO --network flag here).
   // Network attachment happens post-spawn via docker network connect so the
   // container stays on the default bridge (keeping host.docker.internal →
@@ -368,11 +317,6 @@ function buildContainerArgs(
     args.push('-e', `LANGFUSE_HOST=${LF_HOST}`);
     args.push('-e', `LANGFUSE_PUBLIC_KEY=${LF_PUBLIC_KEY}`);
     args.push('-e', `LANGFUSE_SECRET_KEY=${LF_SECRET_KEY}`);
-  }
-
-  // Discord bot token — inject if configured (enables scheduled tasks to post to dedicated channels via Discord REST API)
-  if (DISCORD_BOT_TOKEN) {
-    args.push('-e', `DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}`);
   }
 
   // Run as host user so bind-mounted files are accessible.
@@ -409,46 +353,12 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  // Session freshness check — clear sessionId if idle >1h to avoid paying for stale context
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
-  const lastActivityFile = path.join(groupIpcDir, 'last_activity.json');
-  let effectiveInput = input;
-  if (input.sessionId) {
-    try {
-      const la = JSON.parse(fs.readFileSync(lastActivityFile, 'utf-8'));
-      const idleMs = Date.now() - new Date(la.timestamp).getTime();
-      if (idleMs > SESSION_IDLE_THRESHOLD_MS) {
-        logger.info(
-          { group: group.name, idleMinutes: Math.round(idleMs / 60000), staleSessionId: input.sessionId },
-          'Session idle >1h — starting fresh to avoid stale context cost',
-        );
-        effectiveInput = { ...input, sessionId: undefined };
-      }
-    } catch { /* no file yet or unreadable — keep existing session */ }
-  }
-  // Stamp activity time now (message is being processed)
-  try {
-    fs.mkdirSync(groupIpcDir, { recursive: true });
-    fs.writeFileSync(lastActivityFile, JSON.stringify({ timestamp: new Date().toISOString() }));
-  } catch { /* non-fatal */ }
-
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const model = selectModel(effectiveInput);
-  const { traceId, spanId } = generateTraceIds(effectiveInput.sessionId);
-
-  logger.debug({
-    group: group.name,
-    model,
-    routingEnabled: ROUTING_ENABLED,
-    traceId,
-    spanId,
-    sessionId: effectiveInput.sessionId,
-    chatJid: effectiveInput.chatJid,
-    isMain: effectiveInput.isMain,
-  }, 'Model selected for container');
-  const containerArgs = buildContainerArgs(mounts, containerName, model, traceId, spanId, effectiveInput);
+  const model = selectModel(input);
+  logger.debug({ group: group.name, model, routingEnabled: ROUTING_ENABLED }, 'Model selected for container');
+  const containerArgs = buildContainerArgs(mounts, containerName, model);
 
   logger.debug(
     {
@@ -468,7 +378,7 @@ export async function runContainerAgent(
       group: group.name,
       containerName,
       mountCount: mounts.length,
-      isMain: effectiveInput.isMain,
+      isMain: input.isMain,
     },
     'Spawning container agent',
   );
@@ -711,7 +621,7 @@ export async function runContainerAgent(
         logLines.push(
           `=== Input Summary ===`,
           `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${effectiveInput.sessionId || 'new (idle reset)'}`,
+          `Session ID: ${input.sessionId || 'new'}`,
           ``,
           `=== Mounts ===`,
           mounts

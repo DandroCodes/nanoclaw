@@ -18,7 +18,6 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
-import { createLoggerFromEnv, SecureLogger } from './logger.js';
 
 interface ContainerInput {
   prompt: string;
@@ -58,11 +57,6 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
-
-/**
- * Global logger instance - initialized in main() after reading container input
- */
-let logger: SecureLogger;
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -119,12 +113,16 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_END_MARKER);
 }
 
+function log(message: string): void {
+  console.error(`[agent-runner] ${message}`);
+}
+
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
   const projectDir = path.dirname(transcriptPath);
   const indexPath = path.join(projectDir, 'sessions-index.json');
 
   if (!fs.existsSync(indexPath)) {
-    logger.warn('Sessions index not found', { extra: { filename: path.basename(indexPath) } });
+    log(`Sessions index not found at ${indexPath}`);
     return null;
   }
 
@@ -135,7 +133,7 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
       return entry.summary;
     }
   } catch (err) {
-    logger.error('Failed to read sessions index', { error: err });
+    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return null;
@@ -151,7 +149,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     const sessionId = preCompact.session_id;
 
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      logger.warn('No transcript found for archiving');
+      log('No transcript found for archiving');
       return {};
     }
 
@@ -160,7 +158,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const messages = parseTranscript(content);
 
       if (messages.length === 0) {
-        logger.warn('No messages to archive');
+        log('No messages to archive');
         return {};
       }
 
@@ -177,9 +175,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
       fs.writeFileSync(filePath, markdown);
 
-      logger.info('Archived conversation', { extra: { filename } });
+      log(`Archived conversation to ${filePath}`);
     } catch (err) {
-      logger.error('Failed to archive transcript', { error: err });
+      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {};
@@ -292,13 +290,13 @@ function drainIpcInput(): string[] {
           messages.push(data.text);
         }
       } catch (err) {
-        logger.error('Failed to process input file', { error: err, extra: { filename: file } });
+        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
         try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       }
     }
     return messages;
   } catch (err) {
-    logger.error('IPC drain error', { error: err });
+    log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
@@ -339,7 +337,6 @@ async function runQuery(
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
-  const startTime = Date.now();
   const stream = new MessageStream();
   stream.push(prompt);
 
@@ -349,7 +346,7 @@ async function runQuery(
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
-      logger.info('Close sentinel detected during query, ending stream');
+      log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
@@ -357,7 +354,7 @@ async function runQuery(
     }
     const messages = drainIpcInput();
     for (const text of messages) {
-      logger.debug('Piping IPC message into active query', { extra: { size: text.length } });
+      log(`Piping IPC message into active query (${text.length} chars)`);
       stream.push(text);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -389,18 +386,13 @@ async function runQuery(
     }
   }
   if (extraDirs.length > 0) {
-    logger.debug('Additional directories mounted', { extra: { count: extraDirs.length } });
+    log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
   // Model routing: container-runner.ts injects CLAUDE_MODEL based on prompt complexity.
   // Falls back to undefined (SDK default = Sonnet) if not set.
   const claudeModel = process.env.CLAUDE_MODEL || undefined;
-  logger.info('Query starting', {
-    extra: {
-      promptLength: prompt.length,
-      attemptCount: resumeAt ? 2 : 1,
-    }
-  });
+  log(`Model: ${claudeModel ?? 'sdk-default'}`);
 
   for await (const message of query({
     prompt: stream,
@@ -445,7 +437,7 @@ async function runQuery(
   })) {
     messageCount++;
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    logger.debug('Message received', { extra: { turnNumber: messageCount } });
+    log(`[msg #${messageCount}] type=${msgType}`);
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
@@ -453,30 +445,18 @@ async function runQuery(
 
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
-      logger.info('Session initialized');
-      // Update logger with new session ID
-      logger.setSessionId(newSessionId);
+      log(`Session initialized: ${newSessionId}`);
     }
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
       const tn = message as { task_id: string; status: string; summary: string };
-      logger.debug('Task notification received', {
-        extra: {
-          endpoint: tn.task_id,
-          statusCode: tn.status === 'completed' ? 200 : 102,
-        }
-      });
+      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
     }
 
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      logger.debug('Result received', {
-        extra: {
-          resultCount,
-          size: textResult?.length || 0,
-        }
-      });
+      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',
         result: textResult || null,
@@ -486,14 +466,7 @@ async function runQuery(
   }
 
   ipcPolling = false;
-  const duration = Date.now() - startTime;
-  logger.info('Query completed', {
-    extra: {
-      messageCount,
-      resultCount,
-      duration,
-    }
-  });
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
@@ -504,15 +477,7 @@ async function main(): Promise<void> {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
-
-    // Initialize global logger from environment variables
-    logger = createLoggerFromEnv();
-
-    logger.info('Container started', {
-      extra: {
-        promptLength: containerInput.prompt?.length || 0,
-      }
-    });
+    log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -542,7 +507,7 @@ async function main(): Promise<void> {
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
-    logger.debug('Draining pending IPC messages into initial prompt', { extra: { count: pending.length } });
+    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
   }
 
@@ -550,11 +515,7 @@ async function main(): Promise<void> {
   let resumeAt: string | undefined;
   try {
     while (true) {
-      logger.debug('Starting query', {
-        extra: {
-          attemptCount: resumeAt ? 2 : 1,
-        }
-      });
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
       const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
@@ -568,28 +529,28 @@ async function main(): Promise<void> {
       // Don't emit a session-update marker (it would reset the host's
       // idle timer and cause a 30-min delay before the next _close).
       if (queryResult.closedDuringQuery) {
-        logger.info('Close sentinel consumed during query, exiting');
+        log('Close sentinel consumed during query, exiting');
         break;
       }
 
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
 
-      logger.debug('Query ended, waiting for next IPC message');
+      log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
-        logger.info('Close sentinel received, exiting');
+        log('Close sentinel received, exiting');
         break;
       }
 
-      logger.debug('Got new message, starting new query', { extra: { size: nextMessage.length } });
+      log(`Got new message (${nextMessage.length} chars), starting new query`);
       prompt = nextMessage;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
-    logger.error('Agent error', { error: err });
+    log(`Agent error: ${errorMessage}`);
     writeOutput({
       status: 'error',
       result: null,
@@ -597,9 +558,6 @@ async function main(): Promise<void> {
       error: errorMessage
     });
     process.exit(1);
-  } finally {
-    // Clean up logger resources
-    logger?.destroy();
   }
 }
 

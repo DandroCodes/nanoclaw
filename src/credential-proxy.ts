@@ -86,12 +86,17 @@ export function startCredentialProxy(
             path: req.url,
             method: req.method,
             headers,
+            timeout: 600000, // 10 min — gives heavy parallel agent workloads room to breathe; still well inside 30-min container timeout
           } as RequestOptions,
           (upRes) => {
             res.writeHead(upRes.statusCode!, upRes.headers);
             upRes.pipe(res);
           },
         );
+
+        upstream.on('timeout', () => {
+          upstream.destroy(new Error('Upstream request timed out'));
+        });
 
         upstream.on('error', (err) => {
           logger.error(
